@@ -32,7 +32,7 @@ In the below we implement a sentiment learning task.
 
 Install the repo:
 ```bash
-python setup.py develop
+pip install -e {path to repo}
 ```
 
 Configure accelerate:
