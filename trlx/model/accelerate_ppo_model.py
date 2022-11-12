@@ -1,17 +1,19 @@
+from typing import Tuple
+
 import torch
 from torchtyping import TensorType
+
 from trlx.data.configs import TRLConfig
 from trlx.data.ppo_types import PPORLBatch
 from trlx.model import register_model
 from trlx.model.accelerate_base_model import AccelerateRLModel
-from trlx.model.nn.ppo_models import ( # isort:skip
+from trlx.model.nn.ppo_models import (
     AdaptiveKLController,
     FixedKLController,
     GPTHydraHeadWithValueModel,
 )
 from trlx.pipeline.ppo_pipeline import PPORolloutStorage
 from trlx.utils.modeling import logprobs_from_logits
-from typing import Tuple
 
 
 @register_model
@@ -55,9 +57,7 @@ class AcceleratePPOModel(AccelerateRLModel):
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         tokens = torch.cat((query_tensors, response_tensors), dim=1)
         attention_mask = (
-            tokens.not_equal(self.tokenizer.pad_token_id)
-            .long()
-            .to(tokens.device)
+            tokens.not_equal(self.tokenizer.pad_token_id).long().to(tokens.device)
         )
         # For a proper positional encoding in case of left padding
         position_ids = attention_mask.cumsum(-1) - 1
@@ -65,25 +65,24 @@ class AcceleratePPOModel(AccelerateRLModel):
         return tokens, attention_mask, position_ids
 
     def loss(self, batch: PPORLBatch):
-        # Move `batch` data to accelerator device
+        # Move `batch` data to `accelerator` device
         query_tensors = batch.query_tensors.to(self.accelerator.device)
         response_tensors = batch.response_tensors.to(self.accelerator.device)
-        ref_logprobs = batch.logprobs.to(self.accelerator.device)
-        ref_values = batch.values.to(self.accelerator.device)
-        ref_rewards = batch.rewards.to(self.accelerator.device)
+        old_logprobs = batch.logprobs.to(self.accelerator.device)
+        old_values = batch.values.to(self.accelerator.device)
+        old_rewards = batch.rewards.to(self.accelerator.device)
 
-        # Compute advantages and returns
-        response_length = response_tensors.shape[1]
+        response_length = response_tensors.shape[-1]
         advantages, returns = self.config.method.get_advantages_and_returns(
-            ref_values, ref_rewards, response_length
+            old_values, old_rewards, response_length
         )
-        
-        # Extract logprobs and value predictions from the model
-        # NOTE: Need to do this here because the model is class specific.
+
         tokens, attention_mask, position_ids = self.get_model_inputs(
-            query_tensors, response_tensors)
+            query_tensors, response_tensors
+        )
         logits, _, values_pred = self.model(
-            tokens, attention_mask, position_ids=position_ids)
+            tokens, attention_mask, position_ids=position_ids
+        )
         logprobs = logprobs_from_logits(logits[:, :-1, :], tokens[:, 1:])
         # Only the response part of the values/logprobs is needed
         logprobs, values_pred, mask = (
@@ -93,18 +92,15 @@ class AcceleratePPOModel(AccelerateRLModel):
         )
 
         loss, stats = self.config.method.loss(
+            logprobs=logprobs,
+            values=values_pred,
+            old_logprobs=old_logprobs,
+            old_values=old_values,
             advantages=advantages,
             returns=returns,
-            logprobs=logprobs,
-            values_pred=values_pred,
-            ref_logprobs=ref_logprobs,
-            ref_values=ref_values,
             mask=mask,
         )
-
-        # Update kl controller stats
-        self.approx_kl = stats["policy/approx_kl"]
-
+        self.approx_kl = stats["policy/approx_kl"]  # Update kl controller stats
         return loss, stats
 
     def post_epoch_callback(self):
@@ -114,7 +110,6 @@ class AcceleratePPOModel(AccelerateRLModel):
         )  # Collect more rollouts for training
 
     def post_backward_callback(self):
-        # Update kl_coefficient
         self.kl_ctl.update(self.approx_kl, n_steps=self.config.train.batch_size)
 
     def prepare_learning(self):

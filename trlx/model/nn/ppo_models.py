@@ -3,19 +3,18 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Optional, Tuple, Union
 
+import numpy as np
 import torch
 import torch.nn as nn
-import numpy as np
-
-from deepspeed.pipe import LayerSpec
 from torchtyping import TensorType
-from transformers.modeling_outputs import ModelOutput
-from transformers import (  # isort:skip
+from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
     PretrainedConfig,
     PreTrainedModel,
 )
+from transformers.modeling_outputs import ModelOutput
+
 from trlx.data.method_configs import MethodConfig, register_method
 from trlx.utils.modeling import flatten_dict, whiten
 
@@ -25,8 +24,8 @@ from trlx.utils.modeling import flatten_dict, whiten
 
 class AdaptiveKLController:
     """Adaptive KL Controller as described in Ziegler et al. "Fine-Tuning Language Models from Human Preferences"
-    See: Section 2.2 https://arxiv.org/pdf/1909.08593.pdf#page=2
-    Reference: https://github.com/openai/lm-human-preferences/blob/master/lm_human_preferences/train_policy.py
+    Reference: Section 2.2 https://arxiv.org/pdf/1909.08593.pdf#page=2
+    Source: https://github.com/openai/lm-human-preferences/blob/master/lm_human_preferences/train_policy.py
     """
 
     def __init__(self, init_kl_coef: float, target: float, horizon: int):
@@ -37,8 +36,7 @@ class AdaptiveKLController:
     def update(self, current: float, n_steps: int):
         """Returns adaptively updated KL coefficient, βₜ₊₁.
         Arguments:
-            current: The current KL value between the newest policy and the
-                initial policy.
+            current: The current KL value between the newest policy and the initial policy.
         """
         proportional_error = np.clip(current / self.target - 1, -0.2, 0.2)  # ϵₜ
         mult = 1 + proportional_error * n_steps / self.horizon
@@ -54,8 +52,7 @@ class FixedKLController:
     def update(self, current: float, n_steps: int):
         """Returns updated KL coefficient, βₜ₊₁.
         Arguments:
-            current: The current KL value between the newest policy and the
-                initial policy.
+            current: The current KL value between the newest policy and the initial policy.
         """
         pass
 
@@ -121,6 +118,7 @@ class PPOConfig(MethodConfig):
         values: TensorType["batch_size", "response_size"],
         rewards: TensorType["batch_size", "response_size"],
         response_length: int,
+        use_whitening: Optional[bool] = True,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         lastgaelam = 0
         advantages_reversed = []
@@ -131,79 +129,66 @@ class PPOConfig(MethodConfig):
             advantages_reversed.append(lastgaelam)
         advantages = torch.stack(advantages_reversed[::-1], dim=1)
         returns = advantages + values
-        advantages = whiten(advantages).detach()
-        return advantages, returns
+        if use_whitening:
+            advantages = whiten(advantages)
+        return advantages.detach(), returns
 
     def loss(
         self,
+        logprobs: TensorType["batch_size", "response_size"],
+        values: TensorType["batch_size", "response_size"],
+        old_logprobs: TensorType["batch_size", "response_size"],
+        old_values: TensorType["batch_size", "response_size"],
         advantages: TensorType["batch_size", "response_size"],
         returns: TensorType["batch_size", "response_size"],
-        logprobs: TensorType["batch_size", "response_size"],
-        values_pred: TensorType["batch_size", "response_size"],
-        # Labels
-        ref_logprobs: TensorType["batch_size", "response_size"],
-        ref_values: TensorType["batch_size", "response_size"],
-        # TODO: Add masking
         mask: TensorType["batch_size", "response_size"],
     ):
-        """PPO2
+        """PPO objective function.
         References:
         - https://stable-baselines.readthedocs.io/en/master/modules/ppo2.html
         """
-        # Compute value function error term: Lₜᵛᶠ
-        values_pred_clip = torch.clamp(
-            values_pred,
-            ref_values - self.cliprange_value,
-            ref_values + self.cliprange_value,
+        values_clipped = torch.clamp(
+            values,
+            old_values - self.cliprange_value,
+            old_values + self.cliprange_value,
         )
-        value_fn_loss1 = (values_pred - returns) ** 2
-        value_fn_loss2 = (values_pred_clip - returns) ** 2
-        value_fn_loss = 0.5 * torch.mean(torch.maximum(value_fn_loss1, value_fn_loss2))
-        value_fn_clipfrac = torch.mean((value_fn_loss2 > value_fn_loss1).float())
+        vf_loss1 = (values - returns) ** 2
+        vf_loss2 = (values_clipped - returns) ** 2
+        vf_loss = 0.5 * torch.sum(torch.max(vf_loss1, vf_loss2) * mask) / mask.sum()
+        vf_clipfrac = torch.mean((vf_loss2 > vf_loss1).float())
 
-        # Compute policy error term: Lₜᵖᶠ -> Lₜᶜˡⁱᵖ
-        ratio = torch.exp(logprobs - ref_logprobs)
-        policy_grad_loss1 = -advantages * ratio
-        policy_grad_loss2 = -advantages * torch.clamp(
+        log_ratio = logprobs - old_logprobs
+        ratio = torch.exp(log_ratio)
+        # Unbiased KL-div estimates (`k3`). Ref: http://joschu.net/blog/kl-approx.html
+        with torch.no_grad():
+            approx_kl = torch.mean((ratio - 1) - log_ratio)
+
+        pg_loss1 = -advantages * ratio
+        pg_loss2 = -advantages * torch.clamp(
             ratio,
             1.0 - self.cliprange,
             1.0 + self.cliprange,
         )
-        policy_grad_loss = torch.mean(
-            torch.maximum(policy_grad_loss1, policy_grad_loss2)
-        )
-        policy_grad_clipfrac = torch.mean(
-            (policy_grad_loss2 > policy_grad_loss1).float()
-        )
+        pg_loss = torch.sum(torch.max(pg_loss1, pg_loss2) * mask) / mask.sum()
+        pg_clipfrac = torch.mean((pg_loss2 > pg_loss1).float())
 
-        # Compute PPO2 loss
-        loss = policy_grad_loss + self.vf_coef * value_fn_loss
-
-        # Compute entropy bonus: Lₜᵉ
-        approx_kl = 0.5 * torch.mean((ref_logprobs - logprobs) ** 2)
-
-        # Stats
-        returns_mean, returns_var = torch.mean(returns), torch.var(returns)
-        ref_values_mean, ref_values_var = torch.mean(ref_values), torch.var(ref_values)
+        loss = pg_loss + self.vf_coef * vf_loss
 
         stats = dict(
             losses=dict(
-                policy=policy_grad_loss.item(),
-                value=value_fn_loss.item(),
-                total=loss.item(),
-            ),
-            policy=dict(
-                clipfrac=policy_grad_clipfrac.item(),
-                approx_kl=approx_kl.item(),
+                total_loss=loss.item(),
+                policy_loss=pg_loss.item(),
+                value_loss=vf_loss.item(),
             ),
             values=dict(
-                mean=ref_values_mean,
-                var=ref_values_var,
-                values_pred_mean=torch.mean(values_pred),
-                values_pred_error=torch.mean((values_pred - returns) ** 2),
-                clipfrac=value_fn_clipfrac,
+                mean_old_values=torch.mean(old_values),
+                var_old_values=torch.var(old_values),
+                mean_values=torch.mean(values),
+                values_error=torch.mean((values - returns) ** 2),
+                clipfrac=vf_clipfrac,
             ),
-            returns=dict(mean=returns_mean, var=returns_var),
+            policy=dict(approx_kl=approx_kl.item(), clipfrac=pg_clipfrac.item()),
+            returns=dict(mean=torch.mean(returns), var=torch.var(returns)),
         )
         return loss, flatten_dict(stats)
 

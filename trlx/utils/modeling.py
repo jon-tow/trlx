@@ -1,3 +1,5 @@
+from typing import MutableMapping, Union
+
 import torch
 import torch.nn.functional as F
 
