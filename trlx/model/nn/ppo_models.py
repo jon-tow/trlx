@@ -6,6 +6,10 @@ from typing import Optional, Tuple, Union
 import numpy as np
 import torch
 import torch.nn as nn
+from deepspeed.pipe import LayerSpec, PipelineModule
+from megatron import mpu, print_rank_0
+from megatron.model.gpt2_model import GPT2ModelPipe
+from megatron.neox_arguments import NeoXArgs
 from torchtyping import TensorType
 from transformers import (
     AutoConfig,
@@ -16,8 +20,8 @@ from transformers import (
 from transformers.modeling_outputs import ModelOutput
 
 from trlx.data.method_configs import MethodConfig, register_method
+from trlx.model.nn.neox_models import ParallelScalarHeadPipe, get_layer_name
 from trlx.utils.modeling import flatten_dict, whiten
-
 
 # KL Controllers
 
@@ -278,6 +282,59 @@ class GPTHeadWithValueModel(nn.Module):
             cross_attentions=transformer_outputs.cross_attentions,
             value=value,
         )
+
+
+class GPTNeoXHeadWithValueModel(GPT2ModelPipe):
+    def __init__(self, neox_args: NeoXArgs, config: PPOConfig):
+        super().__init__(
+            neox_args=neox_args,
+            num_tokentypes=0,
+            parallel_output=True,
+            topology=mpu.get_topology(),
+            use_cache=False,
+        )
+        # self.loss_fn = config.method.loss
+
+        # # + 2 to include the `EmbeddingPipe`and  `pre_transformer_block`
+        self.base_model_specs = self.specs[:-1]
+
+        # # The final embedding layer for logits
+        self.lm_head_specs = self.specs[-1:]
+
+        # print_rank_0("=" * 100)
+        # print_rank_0(f"base_model_specs:\n{self.specs_to_str(self.base_model_specs)}\n")
+        # print_rank_0(f"lm_head_specs:\n{self.specs_to_str(self.lm_head_specs)}\n")
+        # print_rank_0("=" * 100)
+        # print_rank_0(f"spec: {self.specs}")
+        # print_rank_0("=" * 100)
+
+        # breakpoint()
+
+        # self.value_head = LayerSpec(
+        #     ParallelScalarHeadPipe,
+        #     self.neox_args,
+        #     init_method=self.init_method,
+        #     output_layer_init_method=self.output_layer_init_method,
+        #     parallel_output=self.parallel_output,
+        # )
+
+        # self.specs = [
+        #     *self.base_model_specs,
+        #     self.lm_head_specs),
+        # ]
+
+        PipelineModule.__init__(
+            self,
+            layers=self.specs,
+            loss_fn=self.loss_fn,
+            topology=self.__topology__,
+            activation_checkpoint_interval=self.activation_checkpoint_interval,
+            partition_method=neox_args.pipe_partition_method,
+            checkpointable_layers=["GMLPBlock", "ParallelTransformerLayerPipe"],
+        )
+
+    def specs_to_str(self, specs) -> str:
+        return "\n".join([str(get_layer_name(s)) for s in specs])
 
 
 class ModelBranch(PreTrainedModel):

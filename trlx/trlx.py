@@ -4,17 +4,12 @@ from typing import Callable, Iterable, List, Optional, Tuple
 from accelerate import Accelerator
 
 from trlx.data.configs import TRLConfig
-
 from trlx.model.accelerate_ilql_model import AccelerateILQLModel
-from trlx.model.accelerate_ppo_model import AcceleratePPOModel
-
 from trlx.orchestrator.offline_orchestrator import OfflineOrchestrator
-from trlx.orchestrator.ppo_orchestrator import PPOOrchestrator
 
+# Manually import NeoX PPO modules to force register
 from trlx.pipeline.offline_pipeline import PromptPipeline
 from trlx.utils.loading import get_model, get_orchestrator
-
-import ray
 
 
 def train(
@@ -25,6 +20,7 @@ def train(
     eval_prompts: Optional[List[str]] = None,
     metric_fn: Optional[Callable] = None,
     config: Optional[TRLConfig] = None,
+    neox_args: Optional[dict] = None,
     split_token: Optional[str] = None,
     logit_mask: Optional[List[List[bool]]] = None,
 ):
@@ -46,23 +42,40 @@ def train(
         if config is None:
             config = TRLConfig.load_yaml("configs/ppo_config.yml")
 
+        # Create the model
         if model_path:
             config.model.model_path = model_path
+        model_class = get_model(config.model.model_type)
+        # TODO: Find a better pattern for this initialization
+        if neox_args is not None:
+            from megatron.utils import print_rank_0
 
-        model: AcceleratePPOModel = get_model(config.model.model_type)(config)
+            print_rank_0("Initializing model with NeoX args")
+            print_rank_0(f"NeoX Args:\n{neox_args}")
+            model = model_class(config, neox_args)
+        else:
+            model = model_class(config)
 
+        # Extract the prompts to be used
         batch_size = config.train.batch_size * int(os.environ.get("WORLD_SIZE", 1))
         prompts = prompts or [model.tokenizer.bos_token] * batch_size
-
         if eval_prompts is None:
             eval_prompts = prompts[:batch_size]
 
-        pipeline = PromptPipeline(prompts, model.tokenizer)
-        orch: PPOOrchestrator = get_orchestrator(config.train.orchestrator)(
+        # Create prompt pipelines
+        pipeline_tokenizer = (
+            model.tokenizer
+        )  # None # model.tokenizer if isinstance(model, NeoXRLModel) else None
+        pipeline = PromptPipeline(prompts, pipeline_tokenizer)
+        # Create orchestrator
+        orch = get_orchestrator(config.train.orchestrator)(
             model, pipeline, reward_fn=reward_fn, chunk_size=config.method.chunk_size
         )
+        # Orchestrate (generate) the rollouts and push to storage
         orch.make_experience(config.method.num_rollouts)
-        eval_pipeline = PromptPipeline(eval_prompts, model.tokenizer)
+
+        # Add the evaluation pipeline
+        eval_pipeline = PromptPipeline(eval_prompts, pipeline_tokenizer)
         model.add_eval_pipeline(eval_pipeline)
 
     elif dataset is not None:

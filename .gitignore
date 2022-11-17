@@ -149,5 +149,6 @@ OUT/
 
 examples/experiments/grounded_program_synthesis/dataset
 ckpts/
-
+logs/
+checkpoints/
 ray_results/

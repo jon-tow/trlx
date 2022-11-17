@@ -13,7 +13,9 @@ def get_model(name: str) -> Callable:
     if name in _MODELS:
         return _MODELS[name]
     else:
-        raise Exception("Error: Trying to access a model that has not been registered")
+        raise Exception(
+            f"Error: Trying to access a model that has not been registered: `{name}`"
+        )
 
 
 def get_pipeline(name: str) -> Callable:
