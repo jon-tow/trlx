@@ -8,7 +8,7 @@ from typing import Any, Dict, Iterable, Sequence, Tuple, Union
 import json
 import torch
 import torch.nn.functional as F
-from accelerate import Accelerator  # type: ignore
+from accelerate import Accelerator, DistributedDataParallelKwargs  # type: ignore
 from transformers import AutoTokenizer
 
 import wandb
@@ -36,7 +36,13 @@ class AccelerateRLModel(BaseRLModel):
     def __init__(self, config, train_mode=True):
         super().__init__(config, train_mode)
 
-        self.accelerator = Accelerator(log_with="wandb")
+        kwargs_handlers = []
+        if config.train.use_ddp:
+            kwargs_handlers.append(
+                DistributedDataParallelKwargs(find_unused_parameters=True)
+            )
+        self.accelerator = Accelerator(
+            log_with="wandb", kwargs_handlers=kwargs_handlers)
 
         if int(os.environ.get("WORLD_SIZE", 1)) > 1:
             torch.distributed.barrier(device_ids=[int(os.environ.get("LOCAL_RANK", 0))])

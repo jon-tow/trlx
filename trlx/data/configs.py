@@ -125,6 +125,7 @@ class TrainConfig:
     entity_name: Optional[str] = None
     seed: int = 1000
 
+    use_ddp: bool = False
     rollout_logging_dir: Optional[str] = None
 
     @classmethod
