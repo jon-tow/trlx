@@ -5,10 +5,9 @@ import math
 import os
 from pathlib import Path
 
-import wandb
+import wandb.apis.reports as wr
 
-wandb.require("report-editing")
-import wandb.apis.reports as wb  # noqa: E402
+import wandb
 
 ray_info = [
     "done",
@@ -84,22 +83,22 @@ def log_trials(trial_path: str, project_name: str):
 def create_report(project_name, param_space, tune_config, trial_path, best_config=None):
     def get_parallel_coordinate(param_space, metric):
         column_names = list(param_space.keys())
-        columns = [wb.reports.PCColumn(column) for column in column_names]
+        columns = [wr.PCColumn(column) for column in column_names]
 
-        return wb.ParallelCoordinatesPlot(
-            columns=columns + [wb.reports.PCColumn(metric)],
+        return wr.ParallelCoordinatesPlot(
+            columns=columns + [wr.PCColumn(metric)],
             layout={"x": 0, "y": 0, "w": 12 * 2, "h": 5 * 2},
         )
 
     def get_param_importance(metric):
-        return wb.ParameterImportancePlot(
+        return wr.ParameterImportancePlot(
             # Get it from the metric name.
             with_respect_to=metric,
             layout={"x": 0, "y": 5, "w": 6 * 2, "h": 4 * 2},
         )
 
     def get_scatter_plot(metric):
-        return wb.ScatterPlot(
+        return wr.ScatterPlot(
             # Get it from the metric name.
             title=f"{metric} v. Index",
             x="Index",
@@ -129,33 +128,33 @@ def create_report(project_name, param_space, tune_config, trial_path, best_confi
         metrics = [metric for metric in metrics if not metric.startswith("_")]
         return metrics
 
-    report = wb.Report(
+    report = wr.Report(
         project=project_name,
         title=f"Hyperparameter Optimization Report: {trial_path}",
         description="This is a report that shows the results of a hyperparameter optimization experiment.",
     )
 
     report.blocks = [
-        wb.P(
+        wr.P(
             "The following plots show the results of the hyperparameter optimization experiment. "
             "Use this as a starting point for your analysis. Go in the edit mode to customize the report. "
             "Share it with your team to collaborate on the analysis."
         ),
-        wb.H1(text="Analysis"),
-        wb.P(
+        wr.H1(text="Analysis"),
+        wr.P(
             "Parallel coordinates chart (top) summarize the relationship between large numbers of hyperparameters "
             "and model metrics at a glance. \nThe scatter plot (right) compares the different trials and gives you a "
             "insight on how the trials progressed. \nThe parameter importance plot(left) lists the hyperparameters "
             "that were the best predictors of, and highly correlated to desirable values of your metrics."
         ),
-        wb.PanelGrid(
+        wr.PanelGrid(
             panels=[
                 get_parallel_coordinate(param_space, tune_config["metric"]),
                 get_param_importance(tune_config["metric"]),
                 get_scatter_plot(tune_config["metric"]),
             ],
             runsets=[
-                wb.RunSet(project=project_name).set_filters_with_python_expr(
+                wr.Runset(project=project_name).set_filters_with_python_expr(
                     f'group == "{trial_path}"'
                 )
             ],
@@ -170,7 +169,7 @@ def create_report(project_name, param_space, tune_config, trial_path, best_confi
     line_plot_panels = []
     for metric in metrics:
         line_plot_panels.append(
-            wb.LinePlot(
+            wr.LinePlot(
                 title=f"{metric}",
                 x="Step",
                 y=[f"{metric}"],
@@ -184,15 +183,15 @@ def create_report(project_name, param_space, tune_config, trial_path, best_confi
         )
 
     report.blocks = report.blocks + [
-        wb.H1(text="Metrics"),
-        wb.P(
+        wr.H1(text="Metrics"),
+        wr.P(
             "The following line plots show the metrics for each trial. Use this to investigate the "
             "performance of the model for each trial at the metrics level."
         ),
-        wb.PanelGrid(
+        wr.PanelGrid(
             panels=line_plot_panels,
             runsets=[
-                wb.RunSet(project=project_name).set_filters_with_python_expr(
+                wr.Runset(project=project_name).set_filters_with_python_expr(
                     f'group == "{trial_path}"'
                 )
             ],
@@ -201,12 +200,12 @@ def create_report(project_name, param_space, tune_config, trial_path, best_confi
 
     if best_config:
         report.blocks = report.blocks + [
-            wb.H1(text="Best Config"),
-            wb.P(
+            wr.H1(text="Best Config"),
+            wr.P(
                 "The code block shown below is the best config found by the hyperparameter "
                 "optimization experiment according to Ray Tune."
             ),
-            wb.CodeBlock(code=[json.dumps(best_config, indent=4)], language="json"),
+            wr.CodeBlock(code=[json.dumps(best_config, indent=4)], language="json"),
         ]
 
     report.save()
