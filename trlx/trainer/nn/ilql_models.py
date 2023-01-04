@@ -16,7 +16,6 @@ from torch import nn
 from trlx.data.ilql_types import ILQLBatch
 from trlx.data.method_configs import MethodConfig, register_method
 from trlx.utils.modeling import (
-    freeze_bottom_causal_layers,
     hf_get_causal_base_model,
     hf_get_hidden_size,
     hf_get_lm_head,
@@ -184,7 +183,6 @@ class CausalLMWithValueHeads(nn.Module):
         self,
         config: Union[transformers.PretrainedConfig, str],
         ilql_config: ILQLConfig,
-        num_layers_unfrozen=-1,
     ):
         super().__init__()
 
@@ -205,7 +203,6 @@ class CausalLMWithValueHeads(nn.Module):
 
         self.base_model.transformer = hf_get_causal_base_model(self.base_model)
         self.base_model.lm_head = hf_get_lm_head(self.base_model)
-        freeze_bottom_causal_layers(self.base_model, num_layers_unfrozen)
 
         # Cache `transformer.forward` args for general use (avoids incompatible args across architectures)
         self.base_model_transformer_args = inspect.getfullargspec(

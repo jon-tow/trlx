@@ -41,7 +41,6 @@ class AccelerateILQLTrainer(AccelerateRLTrainer):
         return CausalLMWithValueHeads(
             config.model.model_path,
             ilql_config=config.method,
-            num_layers_unfrozen=config.model.num_layers_unfrozen,
         )
 
     def tokenize(self, texts: Union[Sequence[str], Sequence[torch.LongTensor]]):
