@@ -51,7 +51,7 @@ def llama_config():
             chunk_size=128,
             ppo_epochs=4,
             init_kl_coef=0.05,
-            target=6,
+            target=0.01,
             horizon=10000,
             gamma=1,
             lam=0.95,
